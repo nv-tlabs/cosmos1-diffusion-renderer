@@ -1,7 +1,7 @@
 attrs==25.1.0
 better-profanity==0.7.0
 boto3==1.35.99
-decord==0.6.0
+decord2==1.0.0
 diffusers==0.32.2
 einops==0.8.1
 huggingface-hub==0.29.2
