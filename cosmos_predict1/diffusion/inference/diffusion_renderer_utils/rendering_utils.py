@@ -113,10 +113,74 @@ def rotate_x(a, device=None):
 
 def rotate_y(a, device=None):
     s, c = np.sin(a), np.cos(a)
-    return torch.tensor([[ c, 0, s, 0], 
-                         [ 0, 1, 0, 0], 
-                         [-s, 0, c, 0], 
+    return torch.tensor([[ c, 0, s, 0],
+                         [ 0, 1, 0, 0],
+                         [-s, 0, c, 0],
                          [ 0, 0, 0, 1]], dtype=torch.float32, device=device)
+
+
+def rotate_z(a, device=None):
+    s, c = np.sin(a), np.cos(a)
+    return torch.tensor([[ c, s, 0, 0],
+                         [-s, c, 0, 0],
+                         [ 0, 0, 1, 0],
+                         [ 0, 0, 0, 1]], dtype=torch.float32, device=device)
+
+
+def rotate_xyz(rx, ry, rz, device=None):
+    """Compose an XYZ rotation matrix from three Euler angles in radians.
+    Order is rotate_z @ rotate_y @ rotate_x so axes are applied as
+    pitch -> yaw -> roll on the rotated frame, matching Three.js /
+    OrbitControls conventions.
+    """
+    if rx == 0 and ry == 0 and rz == 0:
+        return torch.eye(4, dtype=torch.float32, device=device)
+    Rx = rotate_x(rx, device=device) if rx != 0 else torch.eye(4, dtype=torch.float32, device=device)
+    Ry = rotate_y(ry, device=device) if ry != 0 else torch.eye(4, dtype=torch.float32, device=device)
+    Rz = rotate_z(rz, device=device) if rz != 0 else torch.eye(4, dtype=torch.float32, device=device)
+    return Rz @ Ry @ Rx
+
+
+def rotate_latlong(latlong_img, rot_matrix, device=None):
+    """Rotate an equirectangular HDR/LDR image (H, W, 3) by a 3x3 (or 4x4)
+    rotation matrix. For each output pixel the source direction is computed
+    by applying the inverse rotation, and the input is bilinearly resampled.
+
+    This is strictly more general than the horizontal `torch.roll` trick
+    used for yaw-only rotations in `load_and_preprocess_hdr`; use it when
+    any of the pitch / roll axes are non-zero.
+    """
+    if dr is None:
+        raise RuntimeError("rotate_latlong requires nvdiffrast.torch for lat-long sampling")
+    if rot_matrix.shape[-1] == 4:
+        R = rot_matrix[:3, :3]
+    else:
+        R = rot_matrix
+    R = R.to(device=device, dtype=torch.float32)
+
+    H, W = latlong_img.shape[:2]
+    out_dirs = latlong_vec((H, W), device=device)                  # (H, W, 3)
+    # `dir @ R` applies the inverse rotation (R is orthogonal, so R.T == inv).
+    src_dirs = out_dirs @ R                                        # (H, W, 3)
+
+    # Convert source directions back to (gx, gy) using latlong_vec's convention:
+    #   dir = (sin(theta)*sin(phi), cos(theta), -sin(theta)*cos(phi))
+    #   theta = acos(y);   phi = atan2(x, -z)
+    # `latlong_vec` maps gy ∈ [0, 1] -> theta * pi and gx ∈ [-1, 1] -> phi * pi.
+    x = src_dirs[..., 0]
+    y = src_dirs[..., 1].clamp(-1.0, 1.0)
+    z = src_dirs[..., 2]
+    theta = torch.arccos(y)
+    phi = torch.atan2(x, -z)
+    gy = theta / np.pi
+    gx = phi / np.pi
+
+    texcoord = torch.stack([gx, gy], dim=-1)[None]                 # (1, H, W, 2)
+    sampled = dr.texture(
+        latlong_img[None].contiguous(), texcoord.contiguous(), filter_mode='linear'
+    )[0]
+    return sampled
+
 
 def envmap_vec(res, device=None):
     return -latlong_vec(res, device).flip(0).flip(1) #[H, W, 3]
