@@ -54,6 +54,8 @@ def process_environment_map(
     env_strength=1.0,
     env_flip=True,
     env_rot=180.0,
+    env_rot_x=0.0,
+    env_rot_z=0.0,
     save_dir=None,
     prefix='0000',
     device=None,
@@ -75,7 +77,9 @@ def process_environment_map(
         log_scale (int): Log scale factor for HDR mapping.
         env_strength (float): Strength multiplier for the environment map.
         env_flip (bool): Flip the environment map horizontally if True.
-        env_rot (float): Rotation angle for the environment map in degrees.
+        env_rot (float): Yaw rotation of the environment map in degrees (Y axis).
+        env_rot_x (float): Pitch rotation of the environment map in degrees (X axis). 0 = no pitch.
+        env_rot_z (float): Roll rotation of the environment map in degrees (Z axis). 0 = no roll.
         save_dir (str): Directory to save the processed images (optional).
         prefix (str): Prefix for the output files (used if saving images).
 
@@ -115,6 +119,8 @@ def process_environment_map(
         env_strength=env_strength,
         env_flip=env_flip,
         env_rot=env_rot,
+        env_rot_x=env_rot_x,
+        env_rot_z=env_rot_z,
         device=device
     )
 
@@ -127,7 +133,9 @@ def process_environment_map(
         fixed_pose=fixed_pose,
         rotate_envlight=rotate_envlight,
         save_dir=save_dir,
-        prefix=prefix
+        prefix=prefix,
+        env_rot_x=env_rot_x,
+        env_rot_z=env_rot_z
     )
 
     # Initialize result dictionary
@@ -219,8 +227,18 @@ def prepare_camera_poses(num_frames, fixed_pose, pose_file, pose_offset, pose_re
     return c2w_list
 
 
-def load_and_preprocess_hdr(hdr_dir, env_strength, env_flip, env_rot, device):
-    """Load and preprocess the HDR environment map."""
+def load_and_preprocess_hdr(hdr_dir, env_strength, env_flip, env_rot, device,
+                            env_rot_x=0.0, env_rot_z=0.0):
+    """Load and preprocess the HDR environment map.
+
+    Rotation semantics:
+      - When only `env_rot` (yaw) is non-zero and `env_rot_x` / `env_rot_z`
+        are zero, we keep the fast horizontal pixel-roll for bitwise
+        backward compatibility.
+      - When either `env_rot_x` (pitch) or `env_rot_z` (roll) is non-zero we
+        switch to a full 3D direction-remap via `util.rotate_latlong`. This
+        also absorbs `env_rot` so all three axes compose correctly.
+    """
     latlong_img = imageio_v3.imread(hdr_dir, flags=cv2.IMREAD_UNCHANGED, plugin='opencv')
     latlong_img = torch.tensor(latlong_img, dtype=torch.float32, device=device)
     latlong_img *= env_strength
@@ -232,7 +250,16 @@ def load_and_preprocess_hdr(hdr_dir, env_strength, env_flip, env_rot, device):
     if env_flip:
         latlong_img = torch.flip(latlong_img, dims=[1])
 
-    if env_rot != 0:
+    needs_3d_rotation = env_rot_x != 0 or env_rot_z != 0
+    if needs_3d_rotation:
+        R = util.rotate_xyz(
+            np.deg2rad(env_rot_x),
+            np.deg2rad(env_rot),
+            np.deg2rad(env_rot_z),
+            device=device,
+        )
+        latlong_img = util.rotate_latlong(latlong_img, R, device=device)
+    elif env_rot != 0:
         lat_h, lat_w = latlong_img.shape[:2]
         pixel_rot = int(lat_w * env_rot / 360)
         latlong_img = torch.roll(latlong_img, shifts=pixel_rot, dims=1)
@@ -242,11 +269,15 @@ def load_and_preprocess_hdr(hdr_dir, env_strength, env_flip, env_rot, device):
     return cubemap
 
 
-def prepare_metadata(hdr_dir, env_rot, env_flip, env_strength, fixed_pose, rotate_envlight, save_dir, prefix):
+def prepare_metadata(hdr_dir, env_rot, env_flip, env_strength, fixed_pose,
+                     rotate_envlight, save_dir, prefix,
+                     env_rot_x=0.0, env_rot_z=0.0):
     """Prepare metadata about the environment map processing."""
     env_meta = {
         'envmap': os.path.basename(hdr_dir),
         'envmap_rot': env_rot,
+        'envmap_rot_x': env_rot_x,
+        'envmap_rot_z': env_rot_z,
         'envmap_flip': env_flip,
         'envmap_strength': env_strength,
         'fixed_pose': fixed_pose,
